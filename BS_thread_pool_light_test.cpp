@@ -277,6 +277,55 @@ void check_submit()
     }
 }
 
+void check_deadlock_on_destroying()
+{
+    // This test cannot guarantee the absence or presence of a deadlock,
+    // but it greatly simplifies its detection with the correct configuration
+    constexpr int iterationsCount = 10'000;
+    constexpr auto timeout = std::chrono::seconds(5);
+
+
+    static auto payload = [](const int from, const int to){
+        // Mark result variable as 'volatile' to avoid compiler's optimization
+        volatile std::uint64_t r = 0;
+        for (int i = from; i < to; ++i) {
+            r = r * static_cast<std::uint64_t>(i);
+        }
+        return r;
+    };
+
+    auto mutex = std::make_shared<std::mutex>();
+    auto completion_cv = std::make_shared<std::condition_variable>();
+
+    // Copies mutex & cv to avoid UB when thread is detached
+    auto tryToDetermineDeadlock = [mutex, completion_cv]()
+    {
+        for (int i = 0; i < iterationsCount; ++i) {
+            BS::thread_pool_light localPool{2};
+            localPool.push_loop(0, 10, payload);
+            // Increases the probability of deadlock detection
+            std::this_thread::yield();
+        }
+        std::unique_lock lock(*mutex);
+        completion_cv->notify_one();
+    };
+
+    std::thread backgroundThread(tryToDetermineDeadlock);
+
+    std::unique_lock lock (*mutex);
+    const auto status = completion_cv->wait_for(lock, timeout);
+    if (status == std::cv_status::timeout)
+    {
+        backgroundThread.detach();
+        check(false);
+    }
+    else
+    {
+        backgroundThread.join();
+        check(true);
+    }
+}
+
 class flag_class
 {
 public:
@@ -628,6 +677,9 @@ void do_tests()
 
     print_header("Testing that vector operations produce the expected results:");
     check_vectors();
+
+    print_header("Testing that threads are destroyed without deadlock:");
+    check_deadlock_on_destroying();
 }
 
 int main()
